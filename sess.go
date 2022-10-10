@@ -176,6 +176,8 @@ func newUDPSession(conv uint64, dataShards, parityShards int, l *Listener, conn 
 
 	if sess.l == nil { // it's a client connection
 		go sess.readLoop()
+		// 发送握手包
+		sess.handshakeSendConnect()
 		atomic.AddUint64(&DefaultSnmp.ActiveOpens, 1)
 	} else {
 		atomic.AddUint64(&DefaultSnmp.PassiveOpens, 1)
@@ -849,10 +851,13 @@ func (l *Listener) packetInput(data []byte, addr net.Addr) {
 				s.Close()
 				s = nil
 			}
+		} else {
+			convRecovered = l.getWaitConv(conv) != nil
 		}
 
 		if s == nil && convRecovered { // new session
 			if len(l.chAccepts) < cap(l.chAccepts) { // do not let the new sessions overwhelm accept queue
+				l.removeWaitConv(conv)
 				s := newUDPSession(conv, l.dataShards, l.parityShards, l, l.conn, false, addr, l.block)
 				s.kcpInput(data)
 				l.setSession(conv, s)

@@ -2,6 +2,8 @@ package kcp
 
 import (
 	"encoding/binary"
+	"fmt"
+	"log"
 	"math/rand"
 	"net"
 )
@@ -44,9 +46,20 @@ const (
 	enetClientConnectKey       = 1234567890
 )
 
+const (
+	debugLog = false
+)
+
 type handshakeWaiter []*waiter
 
 type waitFilter func(*waiter) bool
+
+func dLog(format string, args ...any) {
+	if !debugLog {
+		return
+	}
+	log.Println("[KCP]", fmt.Sprintf(format, args...))
+}
 
 func (h *handshakeWaiter) getWait(filter waitFilter) *waiter {
 	waiter := *h
@@ -111,6 +124,7 @@ type handshakePkt struct {
 }
 
 func (h *handshakePkt) send(conn net.PacketConn, addr net.Addr) {
+	dLog("%v Pkt send to %v: %+v", conn.LocalAddr(), addr, h)
 	// TODO 异步化?
 	buf := xmitBuf.Get().([]byte)[:handshakePacketSize]
 	h.marshal(buf)
@@ -155,6 +169,9 @@ func (l *Listener) handshake(data []byte, addr net.Addr) (ret bool) {
 
 	var pkt handshakePkt
 	pkt.unmarshal(data)
+
+	dLog("%v Listener.handshake %v Input:%+v", l.conn.LocalAddr(), addr, pkt)
+
 	if pkt.code == codeConnect {
 		// 链接code需要使用服务器创建的conv Id
 		conv, valid := l.getConv(addr)
@@ -202,7 +219,11 @@ func (l *Listener) handlePkt(pkt handshakePkt, addr net.Addr) {
 		pkt.send(l.conn, addr)
 	case codeDisconnect:
 		ses, ok := l.getSession(pkt.conv)
+		if pkt.num != numDisconnectReq {
+			return
+		}
 		if ok {
+			dLog("%v close %v conn", l.conn.LocalAddr(), addr)
 			ses.Close()
 		}
 	default:
@@ -218,7 +239,11 @@ func (s *UDPSession) handshake(data []byte) (ret bool) {
 	ret = true
 	var pkt handshakePkt
 	pkt.unmarshal(data)
+	dLog("UDPSession.handshake Input:%+v", pkt)
 	if pkt.code != codeConnectRsp {
+		return
+	}
+	if pkt.num != numConnectRsp {
 		return
 	}
 	s.kcp.conv = pkt.conv

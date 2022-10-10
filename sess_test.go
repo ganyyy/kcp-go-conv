@@ -87,7 +87,7 @@ func dialTinyBufferEcho(port int) (*UDPSession, error) {
 	return sess, err
 }
 
-//////////////////////////
+// ////////////////////////
 func listenEcho(port int) (net.Listener, error) {
 	//block, _ := NewNoneBlockCrypt(pass)
 	//block, _ := NewSimpleXORBlockCrypt(pass)
@@ -554,8 +554,8 @@ func TestListenerClose(t *testing.T) {
 	}
 
 	l.Close()
-	fakeaddr, _ := net.ResolveUDPAddr("udp6", "127.0.0.1:1111")
-	if l.closeSession(fakeaddr) {
+	// fakeaddr, _ := net.ResolveUDPAddr("udp6", "127.0.0.1:1111")
+	if l.closeSession(0) {
 		t.Fail()
 	}
 }
