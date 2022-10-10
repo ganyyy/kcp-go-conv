@@ -123,7 +123,7 @@ type (
 )
 
 // newUDPSession create a new udp session for client or server
-func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn net.PacketConn, ownConn bool, remote net.Addr, block BlockCrypt) *UDPSession {
+func newUDPSession(conv uint64, dataShards, parityShards int, l *Listener, conn net.PacketConn, ownConn bool, remote net.Addr, block BlockCrypt) *UDPSession {
 	sess := new(UDPSession)
 	sess.die = make(chan struct{})
 	sess.nonce = new(nonceAES128)
@@ -365,9 +365,10 @@ func (s *UDPSession) Close() error {
 		s.mu.Unlock()
 
 		if s.l != nil { // belongs to listener
-			s.l.closeSession(s.remote)
+			s.l.closeSession(s.GetConv())
 			return nil
 		} else if s.ownConn { // client socket close
+			s.handshakeSendDisconnect()
 			return s.conn.Close()
 		} else {
 			return nil
@@ -598,7 +599,7 @@ func (s *UDPSession) update() {
 }
 
 // GetConv gets conversation id of a session
-func (s *UDPSession) GetConv() uint32 { return s.kcp.conv }
+func (s *UDPSession) GetConv() uint64 { return s.kcp.conv }
 
 // GetRTO gets current rto of the session
 func (s *UDPSession) GetRTO() uint32 {
@@ -666,8 +667,14 @@ func (s *UDPSession) packetInput(data []byte) {
 		decrypted = true
 	}
 
-	if decrypted && len(data) >= IKCP_OVERHEAD {
+	if !decrypted {
+		return
+	}
+
+	if len(data) >= IKCP_OVERHEAD {
 		s.kcpInput(data)
+	} else {
+		s.handshake(data)
 	}
 }
 
@@ -771,7 +778,7 @@ type (
 		conn         net.PacketConn // the underlying packet connection
 		ownConn      bool           // true if we created conn internally, false if provided by caller
 
-		sessions        map[string]*UDPSession // all sessions accepted by this Listener
+		sessions        map[uint64]*UDPSession // all sessions accepted by this Listener
 		sessionLock     sync.RWMutex
 		chAccepts       chan *UDPSession // Listen() backlog
 		chSessionClosed chan net.Addr    // session close queue
@@ -785,6 +792,8 @@ type (
 		socketReadErrorOnce sync.Once
 
 		rd atomic.Value // read deadline for Accept()
+
+		handshakeWaiter // 处理握手包
 	}
 )
 
@@ -805,27 +814,33 @@ func (l *Listener) packetInput(data []byte, addr net.Addr) {
 		decrypted = true
 	}
 
-	if decrypted && len(data) >= IKCP_OVERHEAD {
-		l.sessionLock.RLock()
-		s, ok := l.sessions[addr.String()]
-		l.sessionLock.RUnlock()
+	if !decrypted {
+		// 解密失败直接跳过, 不管了
+		return
+	}
 
-		var conv, sn uint32
+	if len(data) >= IKCP_OVERHEAD {
+		// 这可能是一个数据包
+
+		var conv uint64
+		var sn uint32
 		convRecovered := false
 		fecFlag := binary.LittleEndian.Uint16(data[4:])
 		if fecFlag == typeData || fecFlag == typeParity { // 16bit kcp cmd [81-84] and frg [0-255] will not overlap with FEC type 0x00f1 0x00f2
 			// packet with FEC
 			if fecFlag == typeData && len(data) >= fecHeaderSizePlus2+IKCP_OVERHEAD {
-				conv = binary.LittleEndian.Uint32(data[fecHeaderSizePlus2:])
+				conv = binary.LittleEndian.Uint64(data[fecHeaderSizePlus2:])
 				sn = binary.LittleEndian.Uint32(data[fecHeaderSizePlus2+IKCP_SN_OFFSET:])
 				convRecovered = true
 			}
 		} else {
 			// packet without FEC
-			conv = binary.LittleEndian.Uint32(data)
+			conv = binary.LittleEndian.Uint64(data)
 			sn = binary.LittleEndian.Uint32(data[IKCP_SN_OFFSET:])
 			convRecovered = true
 		}
+
+		s, ok := l.getSession(conv)
 
 		if ok { // existing connection
 			if !convRecovered || conv == s.kcp.conv { // parity data or valid conversation
@@ -840,13 +855,27 @@ func (l *Listener) packetInput(data []byte, addr net.Addr) {
 			if len(l.chAccepts) < cap(l.chAccepts) { // do not let the new sessions overwhelm accept queue
 				s := newUDPSession(conv, l.dataShards, l.parityShards, l, l.conn, false, addr, l.block)
 				s.kcpInput(data)
-				l.sessionLock.Lock()
-				l.sessions[addr.String()] = s
-				l.sessionLock.Unlock()
+				l.setSession(conv, s)
 				l.chAccepts <- s
 			}
 		}
+	} else {
+		// 尝试当成握手包处理
+		l.handshake(data, addr)
 	}
+}
+
+func (l *Listener) setSession(conv uint64, s *UDPSession) {
+	l.sessionLock.Lock()
+	l.sessions[conv] = s
+	l.sessionLock.Unlock()
+}
+
+func (l *Listener) getSession(conv uint64) (*UDPSession, bool) {
+	l.sessionLock.RLock()
+	s, ok := l.sessions[conv]
+	l.sessionLock.RUnlock()
+	return s, ok
 }
 
 func (l *Listener) notifyReadError(err error) {
@@ -965,11 +994,11 @@ func (l *Listener) Close() error {
 }
 
 // closeSession notify the listener that a session has closed
-func (l *Listener) closeSession(remote net.Addr) (ret bool) {
+func (l *Listener) closeSession(conv uint64) (ret bool) {
 	l.sessionLock.Lock()
 	defer l.sessionLock.Unlock()
-	if _, ok := l.sessions[remote.String()]; ok {
-		delete(l.sessions, remote.String())
+	if _, ok := l.sessions[conv]; ok {
+		delete(l.sessions, conv)
 		return true
 	}
 	return false
@@ -1010,7 +1039,7 @@ func serveConn(block BlockCrypt, dataShards, parityShards int, conn net.PacketCo
 	l := new(Listener)
 	l.conn = conn
 	l.ownConn = ownConn
-	l.sessions = make(map[string]*UDPSession)
+	l.sessions = make(map[uint64]*UDPSession)
 	l.chAccepts = make(chan *UDPSession, acceptBacklog)
 	l.chSessionClosed = make(chan net.Addr)
 	l.die = make(chan struct{})
@@ -1048,19 +1077,19 @@ func DialWithOptions(raddr string, block BlockCrypt, dataShards, parityShards in
 		return nil, errors.WithStack(err)
 	}
 
-	var convid uint32
-	binary.Read(rand.Reader, binary.LittleEndian, &convid)
+	var convid uint64
+	// binary.Read(rand.Reader, binary.LittleEndian, &convid)
 	return newUDPSession(convid, dataShards, parityShards, nil, conn, true, udpaddr, block), nil
 }
 
 // NewConn3 establishes a session and talks KCP protocol over a packet connection.
-func NewConn3(convid uint32, raddr net.Addr, block BlockCrypt, dataShards, parityShards int, conn net.PacketConn) (*UDPSession, error) {
+func NewConn3(convid uint64, raddr net.Addr, block BlockCrypt, dataShards, parityShards int, conn net.PacketConn) (*UDPSession, error) {
 	return newUDPSession(convid, dataShards, parityShards, nil, conn, false, raddr, block), nil
 }
 
 // NewConn2 establishes a session and talks KCP protocol over a packet connection.
 func NewConn2(raddr net.Addr, block BlockCrypt, dataShards, parityShards int, conn net.PacketConn) (*UDPSession, error) {
-	var convid uint32
+	var convid uint64
 	binary.Read(rand.Reader, binary.LittleEndian, &convid)
 	return NewConn3(convid, raddr, block, dataShards, parityShards, conn)
 }

@@ -22,13 +22,13 @@ const (
 	IKCP_MTU_DEF     = 1400
 	IKCP_ACK_FAST    = 3
 	IKCP_INTERVAL    = 100
-	IKCP_OVERHEAD    = 24
+	IKCP_OVERHEAD    = 28
 	IKCP_DEADLINK    = 20
 	IKCP_THRESH_INIT = 2
 	IKCP_THRESH_MIN  = 2
 	IKCP_PROBE_INIT  = 7000   // 7 secs to probe window size
 	IKCP_PROBE_LIMIT = 120000 // up to 120 secs to probe window
-	IKCP_SN_OFFSET   = 12
+	IKCP_SN_OFFSET   = 16
 )
 
 // monotonic reference time point
@@ -76,6 +76,18 @@ func ikcp_decode32u(p []byte, l *uint32) []byte {
 	return p[4:]
 }
 
+/* encode 64 bits unsigned int (lsb) */
+func ikcp_encode64u(p []byte, l uint64) []byte {
+	binary.LittleEndian.PutUint64(p, l)
+	return p[8:]
+}
+
+/* decode 64 bits unsigned int (lsb) */
+func ikcp_decode64u(p []byte, l *uint64) []byte {
+	*l = binary.LittleEndian.Uint64(p)
+	return p[8:]
+}
+
 func _imin_(a, b uint32) uint32 {
 	if a <= b {
 		return a
@@ -100,7 +112,7 @@ func _itimediff(later, earlier uint32) int32 {
 
 // segment defines a KCP segment
 type segment struct {
-	conv     uint32
+	conv     uint64
 	cmd      uint8
 	frg      uint8
 	wnd      uint16
@@ -117,7 +129,7 @@ type segment struct {
 
 // encode a segment into buffer
 func (seg *segment) encode(ptr []byte) []byte {
-	ptr = ikcp_encode32u(ptr, seg.conv)
+	ptr = ikcp_encode64u(ptr, seg.conv)
 	ptr = ikcp_encode8u(ptr, seg.cmd)
 	ptr = ikcp_encode8u(ptr, seg.frg)
 	ptr = ikcp_encode16u(ptr, seg.wnd)
@@ -131,7 +143,8 @@ func (seg *segment) encode(ptr []byte) []byte {
 
 // KCP defines a single KCP connection
 type KCP struct {
-	conv, mtu, mss, state                  uint32
+	conv                                   uint64
+	mtu, mss, state                        uint32
 	snd_una, snd_nxt, rcv_nxt              uint32
 	ssthresh                               uint32
 	rx_rttvar, rx_srtt                     int32
@@ -167,7 +180,7 @@ type ackItem struct {
 // 'conv' must be equal in the connection peers, or else data will be silently rejected.
 //
 // 'output' function will be called whenever these is data to be sent on wire.
-func NewKCP(conv uint32, output output_callback) *KCP {
+func NewKCP(conv uint64, output output_callback) *KCP {
 	kcp := new(KCP)
 	kcp.conv = conv
 	kcp.snd_wnd = IKCP_WND_SND
@@ -538,7 +551,8 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 	var windowSlides bool
 
 	for {
-		var ts, sn, length, una, conv uint32
+		var conv uint64
+		var ts, sn, length, una uint32
 		var wnd uint16
 		var cmd, frg uint8
 
@@ -546,7 +560,7 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 			break
 		}
 
-		data = ikcp_decode32u(data, &conv)
+		data = ikcp_decode64u(data, &conv)
 		if conv != kcp.conv {
 			return -1
 		}

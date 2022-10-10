@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 package kcp
@@ -14,6 +15,9 @@ import (
 
 // the read loop for a client session
 func (s *UDPSession) readLoop() {
+	// 发送握手包
+	s.handshakeSendConnect()
+
 	// default version
 	if s.xconn == nil {
 		s.defaultReadLoop()
