@@ -39,7 +39,7 @@ func handleEcho(conn *kcp.UDPSession) {
 			return
 		}
 
-		n, err = conn.Write(buf[:n])
+		_, err = conn.Write(buf[:n])
 		if err != nil {
 			log.Println("Write", conn.RemoteAddr(), err)
 			return
@@ -53,15 +53,10 @@ func client() {
 	time.Sleep(time.Second)
 
 	// dial to the echo server
-	if sess, err := kcp.Dial("127.0.0.1:12345"); err == nil {
+	if sess, err := kcp.Dial("127.0.0.1:12345", kcp.WithDialTimeout(time.Second*3)); err == nil {
 		for {
 			data := time.Now().String()
 			buf := make([]byte, len(data))
-			if conv := sess.(*kcp.UDPSession).GetConv(); conv == 0 {
-				// 等待握手完成
-				time.Sleep(time.Second)
-				continue
-			}
 			log.Println(sess.LocalAddr(), "sent:", data)
 			if _, err := sess.Write([]byte(data)); err == nil {
 				// read back the data

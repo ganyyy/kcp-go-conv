@@ -247,6 +247,10 @@ func (s *UDPSession) handshake(data []byte) (ret bool) {
 		return
 	}
 	s.kcp.conv = pkt.conv
+	s.handshakeOnce.Do(func() {
+		dLog("UDPSession.handshake: conv:%v", pkt.conv)
+		close(s.handshakeChan)
+	})
 	return
 }
 

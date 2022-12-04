@@ -8,6 +8,7 @@
 package kcp
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"hash/crc32"
@@ -95,8 +96,10 @@ type (
 		socketWriteError     atomic.Value
 		chSocketReadError    chan struct{}
 		chSocketWriteError   chan struct{}
+		handshakeChan        chan struct{} // 握手成功的通知channel
 		socketReadErrorOnce  sync.Once
 		socketWriteErrorOnce sync.Once
+		handshakeOnce        sync.Once
 
 		// nonce generator
 		nonce Entropy
@@ -177,6 +180,7 @@ func newUDPSession(conv uint64, dataShards, parityShards int, l *Listener, conn 
 	if sess.l == nil { // it's a client connection
 		go sess.readLoop()
 		// 发送握手包
+		sess.handshakeChan = make(chan struct{}) // 仅通知
 		sess.handshakeSendConnect()
 		atomic.AddUint64(&DefaultSnmp.ActiveOpens, 1)
 	} else {
@@ -1056,8 +1060,22 @@ func serveConn(block BlockCrypt, dataShards, parityShards int, conn net.PacketCo
 	return l, nil
 }
 
+type sessionOption struct {
+	dialTimeout time.Duration
+}
+
+type SessionOptionFunc func(opt *sessionOption)
+
+func WithDialTimeout(t time.Duration) SessionOptionFunc {
+	return func(opt *sessionOption) {
+		opt.dialTimeout = t
+	}
+}
+
 // Dial connects to the remote address "raddr" on the network "udp" without encryption and FEC
-func Dial(raddr string) (net.Conn, error) { return DialWithOptions(raddr, nil, 0, 0) }
+func Dial(raddr string, opt ...SessionOptionFunc) (net.Conn, error) {
+	return DialWithOptions(raddr, nil, 0, 0, opt...)
+}
 
 // DialWithOptions connects to the remote address "raddr" on the network "udp" with packet encryption
 //
@@ -1066,7 +1084,7 @@ func Dial(raddr string) (net.Conn, error) { return DialWithOptions(raddr, nil, 0
 // 'dataShards', 'parityShards' specify how many parity packets will be generated following the data packets.
 //
 // Check https://github.com/klauspost/reedsolomon for details
-func DialWithOptions(raddr string, block BlockCrypt, dataShards, parityShards int) (*UDPSession, error) {
+func DialWithOptions(raddr string, block BlockCrypt, dataShards, parityShards int, opt ...SessionOptionFunc) (*UDPSession, error) {
 	// network type detection
 	udpaddr, err := net.ResolveUDPAddr("udp", raddr)
 	if err != nil {
@@ -1082,9 +1100,23 @@ func DialWithOptions(raddr string, block BlockCrypt, dataShards, parityShards in
 		return nil, errors.WithStack(err)
 	}
 
+	var defaultOpt sessionOption
+	for _, op := range opt {
+		op(&defaultOpt)
+	}
 	var convid uint64
 	// binary.Read(rand.Reader, binary.LittleEndian, &convid)
-	return newUDPSession(convid, dataShards, parityShards, nil, conn, true, udpaddr, block), nil
+	session := newUDPSession(convid, dataShards, parityShards, nil, conn, true, udpaddr, block)
+	if defaultOpt.dialTimeout > 0 {
+		var ctx, cancel = context.WithTimeout(context.Background(), defaultOpt.dialTimeout)
+		defer cancel()
+		select {
+		case <-ctx.Done():
+			return nil, errTimeout
+		case <-session.handshakeChan:
+		}
+	}
+	return session, nil
 }
 
 // NewConn3 establishes a session and talks KCP protocol over a packet connection.
