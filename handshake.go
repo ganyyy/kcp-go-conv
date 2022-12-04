@@ -61,7 +61,7 @@ func dLog(format string, args ...any) {
 	log.Println("[KCP]", fmt.Sprintf(format, args...))
 }
 
-func (h *handshakeWaiter) getWait(filter waitFilter) *waiter {
+func (h *handshakeWaiter) filterWait(filter waitFilter) *waiter {
 	waiter := *h
 	for _, w := range waiter {
 		if filter(w) {
@@ -75,7 +75,10 @@ func (h *handshakeWaiter) removeWaitConv(conv uint64) {
 	waiter := *h
 	for i, w := range waiter {
 		if w.conv == conv {
-			waiter = append(waiter[:i], waiter[i+1:]...)
+			ln := len(waiter) - 1
+			waiter[i], waiter[ln] = waiter[ln], nil
+			waiter = waiter[:ln]
+			break
 		}
 	}
 	*h = waiter
@@ -92,20 +95,18 @@ func (h *handshakeWaiter) addNewWait(w waiter) {
 }
 
 func (h *handshakeWaiter) getWaitAddr(addr string) *waiter {
-	return h.getWait(func(w *waiter) bool {
+	return h.filterWait(func(w *waiter) bool {
 		return w.addr == addr
 	})
 }
 
 func (h *handshakeWaiter) getWaitConv(conv uint64) *waiter {
-	return h.getWait(func(w *waiter) bool {
+	return h.filterWait(func(w *waiter) bool {
 		return w.conv == conv
 	})
 }
 
-func generateConvId() uint64 {
-	return rand.Uint64()
-}
+func generateConvId() uint64 { return rand.Uint64() }
 
 var (
 	endian = binary.LittleEndian
@@ -227,7 +228,7 @@ func (l *Listener) handlePkt(pkt handshakePkt, addr net.Addr) {
 			ses.Close()
 		}
 	default:
-		//TODO 错误日志
+		//TODO  其他逻辑处理
 	}
 }
 
@@ -246,8 +247,8 @@ func (s *UDPSession) handshake(data []byte) (ret bool) {
 	if pkt.num != numConnectRsp {
 		return
 	}
-	s.kcp.conv = pkt.conv
 	s.handshakeOnce.Do(func() {
+		s.kcp.conv = pkt.conv
 		dLog("UDPSession.handshake: conv:%v", pkt.conv)
 		close(s.handshakeChan)
 	})

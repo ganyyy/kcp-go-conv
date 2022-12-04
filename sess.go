@@ -1006,11 +1006,10 @@ func (l *Listener) Close() error {
 func (l *Listener) closeSession(conv uint64) (ret bool) {
 	l.sessionLock.Lock()
 	defer l.sessionLock.Unlock()
-	if _, ok := l.sessions[conv]; ok {
+	if _, ret = l.sessions[conv]; ret {
 		delete(l.sessions, conv)
-		return true
 	}
-	return false
+	return
 }
 
 // Addr returns the listener's network address, The Addr returned is shared by all invocations of Addr, so do not modify it.
