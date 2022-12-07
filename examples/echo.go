@@ -53,7 +53,7 @@ func client() {
 	time.Sleep(time.Second)
 
 	// dial to the echo server
-	if sess, err := kcp.Dial("127.0.0.1:12345", kcp.WithDialTimeout(time.Second*3)); err == nil {
+	if sess, err := kcp.Dial("127.0.0.1:12346", kcp.WithDialTimeout(time.Second*3)); err == nil {
 		for {
 			data := time.Now().String()
 			buf := make([]byte, len(data))
@@ -75,6 +75,6 @@ func client() {
 			time.Sleep(time.Second)
 		}
 	} else {
-		log.Fatal(err)
+		log.Printf("connect error: %v", err)
 	}
 }

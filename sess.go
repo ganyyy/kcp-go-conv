@@ -1106,14 +1106,16 @@ func DialWithOptions(raddr string, block BlockCrypt, dataShards, parityShards in
 	var convid uint64
 	// binary.Read(rand.Reader, binary.LittleEndian, &convid)
 	session := newUDPSession(convid, dataShards, parityShards, nil, conn, true, udpaddr, block)
+	ctx := context.Background()
 	if defaultOpt.dialTimeout > 0 {
-		var ctx, cancel = context.WithTimeout(context.Background(), defaultOpt.dialTimeout)
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultOpt.dialTimeout)
 		defer cancel()
-		select {
-		case <-ctx.Done():
-			return nil, errTimeout
-		case <-session.handshakeChan:
-		}
+	}
+	select {
+	case <-ctx.Done():
+		return nil, errTimeout
+	case <-session.handshakeChan:
 	}
 	return session, nil
 }
